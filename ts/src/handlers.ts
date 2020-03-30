@@ -1,20 +1,14 @@
 import { getContractAddressesForNetworkOrThrow } from '@0x/contract-addresses';
 import { ContractWrappers, OrderAndTraderInfo } from '@0x/contract-wrappers';
-import {
-    eip712Utils,
-    orderCalculationUtils,
-    orderHashUtils,
-    signatureUtils,
-    transactionHashUtils,
-} from '@0x/order-utils';
+import { orderCalculationUtils, orderHashUtils, signatureUtils, transactionHashUtils } from '@0x/order-utils';
 import { Web3ProviderEngine } from '@0x/subproviders';
 import { Order, SignatureType, SignedOrder, SignedZeroExTransaction } from '@0x/types';
-import { BigNumber, DecodedCalldata, signTypedDataUtils } from '@0x/utils';
+import { BigNumber, DecodedCalldata } from '@0x/utils';
 import * as ethUtil from 'ethereumjs-util';
 import * as express from 'express';
 import * as HttpStatus from 'http-status-codes';
 import * as _ from 'lodash';
-
+import * as sigUtil from 'eth-sig-util';
 import { ValidationError, ValidationErrorCodes, ValidationErrorItem } from './errors';
 import { orderModel } from './models/order_model';
 import { transactionModel } from './models/transaction_model';
@@ -54,6 +48,25 @@ export class Handlers {
     private readonly _broadcastCallback: BroadcastCallback;
     private readonly _networkIdToContractWrappers: NetworkIdToContractWrappers;
     private readonly _configs: Configs;
+
+    constructor(networkIdToProvider: NetworkIdToProvider, configs: Configs, broadcastCallback: BroadcastCallback) {
+        this._networkIdToProvider = networkIdToProvider;
+        this._broadcastCallback = broadcastCallback;
+        this._configs = configs;
+        this._networkIdToContractWrappers = {};
+        _.each(networkIdToProvider, (provider: Web3ProviderEngine, networkIdStr: string) => {
+            const networkId = _.parseInt(networkIdStr);
+            const contractAddresses = configs.NETWORK_ID_TO_CONTRACT_ADDRESSES
+                ? configs.NETWORK_ID_TO_CONTRACT_ADDRESSES[networkId]
+                : undefined;
+            const contractWrappers = new ContractWrappers(provider, {
+                networkId,
+                contractAddresses,
+            });
+            this._networkIdToContractWrappers[networkId] = contractWrappers;
+        });
+    }
+
     private static _calculateRemainingFillableTakerAssetAmount(
         signedOrder: SignedOrder,
         orderAndTraderInfo: OrderAndTraderInfo,
@@ -106,6 +119,7 @@ export class Handlers {
         const maxTakerAssetFillAmount = BigNumber.min(...minSet);
         return maxTakerAssetFillAmount;
     }
+
     private static _getOrdersFromDecodedCalldata(decodedCalldata: DecodedCalldata, networkId: number): Order[] {
         const contractAddresses = getContractAddressesForNetworkOrThrow(networkId);
 
@@ -144,6 +158,7 @@ export class Handlers {
                 throw utils.getInvalidFunctionCallError(decodedCalldata.functionName);
         }
     }
+
     private static async _validateFillsAllowedOrThrowAsync(
         signedTransaction: SignedZeroExTransaction,
         coordinatorOrders: Order[],
@@ -203,23 +218,12 @@ export class Handlers {
             throw new ValidationError(validationErrors);
         }
     }
-    constructor(networkIdToProvider: NetworkIdToProvider, configs: Configs, broadcastCallback: BroadcastCallback) {
-        this._networkIdToProvider = networkIdToProvider;
-        this._broadcastCallback = broadcastCallback;
-        this._configs = configs;
-        this._networkIdToContractWrappers = {};
-        _.each(networkIdToProvider, (provider: Web3ProviderEngine, networkIdStr: string) => {
-            const networkId = _.parseInt(networkIdStr);
-            const contractAddresses = configs.NETWORK_ID_TO_CONTRACT_ADDRESSES
-                ? configs.NETWORK_ID_TO_CONTRACT_ADDRESSES[networkId]
-                : undefined;
-            const contractWrappers = new ContractWrappers(provider, {
-                networkId,
-                contractAddresses,
-            });
-            this._networkIdToContractWrappers[networkId] = contractWrappers;
-        });
+
+    private static validateOrderBatch() {
+
     }
+
+
     public async postRequestTransactionAsync(req: express.Request, res: express.Response): Promise<void> {
         // 1. Validate request schema
         utils.validateSchema(req.body, requestTransactionSchema);
@@ -248,16 +252,19 @@ export class Handlers {
         }
 
         // 3. Check if at least one order in calldata has the Coordinator's feeRecipientAddress
-        let orders: Order[] = [];
-        orders = Handlers._getOrdersFromDecodedCalldata(decodedCalldata, networkId);
-        const coordinatorOrders = _.filter(orders, order => {
-            const coordinatorFeeRecipients = this._configs.NETWORK_ID_TO_SETTINGS[networkId].FEE_RECIPIENTS;
-            const coordinatorFeeRecipientAddresses = _.map(
-                coordinatorFeeRecipients,
-                feeRecipient => feeRecipient.ADDRESS,
-            );
-            return _.includes(coordinatorFeeRecipientAddresses, order.feeRecipientAddress);
-        });
+        // let orders: Order[] = [];
+        // orders = Handlers._getOrdersFromDecodedCalldata(decodedCalldata, networkId);
+        const coordinatorOrders: Order[] = Handlers._getOrdersFromDecodedCalldata(decodedCalldata, networkId);
+        // const coordinatorOrders = _.filter(orders, order => {
+        //     const coordinatorFeeRecipients = this._configs.NETWORK_ID_TO_SETTINGS[networkId].FEE_RECIPIENTS;
+        //     const coordinatorFeeRecipientAddresses = _.map(
+        //         coordinatorFeeRecipients,
+        //         feeRecipient => feeRecipient.ADDRESS,
+        //     );
+        //     return _.includes(coordinatorFeeRecipientAddresses, order.feeRecipientAddress);
+        // });
+
+        // const coordinatorOrders = orders;
         if (_.isEmpty(coordinatorOrders)) {
             throw new ValidationError([
                 {
@@ -273,16 +280,17 @@ export class Handlers {
         // the same transaction with a different `txOrigin` in an attempt to fill the order through an
         // alternative tx.origin entry-point.
         const transactionHash = transactionHashUtils.getTransactionHashHex(signedTransaction);
-        const transactionIfExists = await transactionModel.findByHashAsync(transactionHash);
-        if (transactionIfExists !== undefined) {
-            throw new ValidationError([
-                {
-                    field: 'signedTransaction',
-                    code: ValidationErrorCodes.TransactionAlreadyUsed,
-                    reason: `A transaction can only be approved once. To request approval to perform the same actions, generate and sign an identical transaction with a different salt value.`,
-                },
-            ]);
-        }
+        // const transactionIfExists = await transactionModel.findByHashAsync(transactionHash);
+        // if (transactionIfExists !== undefined) {
+        //     throw new ValidationError([
+        //         {
+        //             field: 'signedTransaction',
+        //             code: ValidationErrorCodes.TransactionAlreadyUsed,
+        //             reason: `A transaction can only be approved once. To request approval to perform the same actions, generate and sign an identical transaction with a different salt value.`,
+        //         },
+        //     ]);
+        // }
+
 
         // 5. Validate the 0x transaction signature
         const provider = this._networkIdToProvider[networkId];
@@ -302,6 +310,8 @@ export class Handlers {
             ]);
         }
 
+        // 6. filter out orders which have been reserved in a previous approval
+
         // 6. Handle the request
         switch (decodedCalldata.functionName) {
             case ExchangeMethods.FillOrder:
@@ -315,6 +325,9 @@ export class Handlers {
             case ExchangeMethods.MarketBuyOrders:
             case ExchangeMethods.MarketBuyOrdersNoThrow: {
                 const takerAddress = signedTransaction.signerAddress;
+                // validateOrders/it should filter out orders which are not in to a separate batch
+                // have not been canceled
+                // there is a available fill amount
                 const takerAssetFillAmounts = await this._getTakerAssetFillAmountsFromDecodedCalldataAsync(
                     decodedCalldata,
                     takerAddress,
@@ -360,6 +373,7 @@ export class Handlers {
                 throw utils.getInvalidFunctionCallError(decodedCalldata.functionName);
         }
     }
+
     // tslint:disable-next-line:prefer-function-over-method
     public async postSoftCancelsAsync(req: express.Request, res: express.Response): Promise<void> {
         utils.validateSchema(req.body, softCancelsSchema);
@@ -369,6 +383,7 @@ export class Handlers {
             orderHashes: softCancelsFound,
         });
     }
+
     private async _getTakerAssetFillAmountsFromDecodedCalldataAsync(
         decodedCalldata: DecodedCalldata,
         takerAddress: string,
@@ -484,6 +499,7 @@ export class Handlers {
         }
         return takerAssetFillAmounts;
     }
+
     private async _handleCancelsAsync(
         coordinatorOrders: Order[],
         signedTransaction: SignedZeroExTransaction,
@@ -537,6 +553,7 @@ export class Handlers {
             },
         };
     }
+
     private async _handleFillsAsync(
         coordinatorOrders: Order[],
         txOrigin: string,
@@ -544,8 +561,7 @@ export class Handlers {
         takerAssetFillAmounts: BigNumber[],
         networkId: number,
     ): Promise<Response> {
-        await Handlers._validateFillsAllowedOrThrowAsync(signedTransaction, coordinatorOrders, takerAssetFillAmounts);
-
+        // await Handlers._validateFillsAllowedOrThrowAsync(signedTransaction, coordinatorOrders, takerAssetFillAmounts);
         const transactionHash = transactionHashUtils.getTransactionHashHex(signedTransaction);
         const fillRequestReceivedEvent = {
             type: EventTypes.FillRequestReceived,
@@ -591,6 +607,7 @@ export class Handlers {
             body: response,
         };
     }
+
     private async _generateApprovalSignatureAsync(
         txOrigin: string,
         signedTransaction: SignedZeroExTransaction,
@@ -598,14 +615,119 @@ export class Handlers {
         networkId: number,
         approvalExpirationTimeSeconds: number,
     ): Promise<RequestTransactionResponse> {
-        const contractWrappers = this._networkIdToContractWrappers[networkId];
-        const typedData = eip712Utils.createCoordinatorApprovalTypedData(
-            signedTransaction,
-            contractWrappers.coordinator.address,
+        const coordinatorAddress = '0x17bce63db58bbf1bded70decd1161ce8f0d4ce4a'; // old approval struct
+        // const coordinatorAddress = '0xb4260cc0692e2d43c617e002ecb1edc9c5601f25'; // new approval struct, commented out the validation
+
+        // const contractWrappers = this._networkIdToContractWrappers[networkId];
+
+        // const constants = {
+        //     COORDINATOR_DOMAIN_NAME: '0x Protocol Coordinator',
+        //     COORDINATOR_DOMAIN_VERSION: '1.0.0',
+        //     COORDINATOR_APPROVAL_SCHEMA: {
+        //         name: 'CoordinatorApproval',
+        //         parameters: [
+        //             { name: 'txOrigin', type: 'address' },
+        //             { name: 'transactionHash', type: 'bytes32' },
+        //             { name: 'transactionSignature', type: 'bytes' },
+        //             { name: 'approvalExpirationTimeSeconds', type: 'uint256' },
+        //         ],
+        //     },
+        // };
+        // const typedData = eip712Utils.createCoordinatorApprovalTypedData(
+        //     signedTransaction,
+        //     coordinatorAddress,
+        //     txOrigin,
+        //     new BigNumber(approvalExpirationTimeSeconds),
+        // );
+        const constants_v1 = {
+            COORDINATOR_DOMAIN_NAME: '0x Protocol Coordinator',
+            COORDINATOR_DOMAIN_VERSION: '1.0.0',
+            COORDINATOR_APPROVAL_SCHEMA: {
+                name: 'CoordinatorApproval',
+                parameters: [
+                    { name: 'txOrigin', type: 'address' },
+                    { name: 'transactionHash', type: 'bytes32' },
+                    { name: 'transactionSignature', type: 'bytes' },
+                    { name: 'approvalExpirationTimeSeconds', type: 'uint256' },
+                ],
+            },
+        };
+        // const approvalHashBuff = signTypedDataUtils.generateTypedDataHash(typedData);
+        // const domain = {
+        //     name: constants.COORDINATOR_DOMAIN_NAME,
+        //     version: constants.COORDINATOR_DOMAIN_VERSION,
+        //     verifyingContractAddress,
+        // };
+        // const transactionHash = transactionHashUtils.getTransactionHashHex(transaction);
+        // const approval = {
+        //     txOrigin,
+        //     transactionHash,
+        //     transactionSignature: transaction.signature,
+        //     approvalExpirationTimeSeconds: approvalExpirationTimeSeconds.toString(),
+        // };
+        // const typedData = eip712Utils.createTypedData(
+        //     constants.COORDINATOR_APPROVAL_SCHEMA.name,
+        //     {
+        //         CoordinatorApproval: constants.COORDINATOR_APPROVAL_SCHEMA.parameters,
+        //     },
+        //     approval,
+        //     domain,
+        // );
+        // return typedData;
+        // const typedData = eip712Utils.createTypedData(
+        //     signedTransaction,
+        //     coordinatorAddress,
+        //     txOrigin,
+        //     new BigNumber(approvalExpirationTimeSeconds),
+        // );
+
+
+        const zeroxOrderHashes: string[] = coordinatorOrders.map(order => {
+            return orderHashUtils.getOrderHashHex(order);
+        });
+
+        const constants = {
+            COORDINATOR_DOMAIN_NAME: '0x Protocol Coordinator',
+            COORDINATOR_DOMAIN_VERSION: '1.0.0',
+            COORDINATOR_APPROVAL_SCHEMA: {
+                name: 'CoordinatorApproval',
+                parameters: [
+                    { name: 'zeroxOrderHashes', type: 'bytes32[]' },
+                    { name: 'txOrigin', type: 'address' },
+                    { name: 'approvalExpirationTimeSeconds', type: 'uint256' },
+                ],
+            },
+        };
+        const approval = {
+            zeroxOrderHashes,
             txOrigin,
-            new BigNumber(approvalExpirationTimeSeconds),
-        );
-        const approvalHashBuff = signTypedDataUtils.generateTypedDataHash(typedData);
+            approvalExpirationTimeSeconds,
+        };
+
+        // const domain = {
+        //     name: constants.COORDINATOR_DOMAIN_NAME,
+        //     version: constants.COORDINATOR_DOMAIN_VERSION,
+        //     verifyingContractAddress,
+        // };
+
+        // TODO: generate previous EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH
+        const EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH_v1 = sigUtil.TypedDataUtils.hashType(constants_v1.COORDINATOR_APPROVAL_SCHEMA.name, { CoordinatorApproval: constants_v1.COORDINATOR_APPROVAL_SCHEMA.parameters }).toString('hex');
+        const EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH = sigUtil.TypedDataUtils.hashType(constants.COORDINATOR_APPROVAL_SCHEMA.name, { CoordinatorApproval: constants.COORDINATOR_APPROVAL_SCHEMA.parameters }).toString('hex');
+
+        console.log('EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH, EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH_v1', [EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH, EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH_v1]);
+
+        // const typedData = sigUtil.TypedDataUtils.encodeData(constants.COORDINATOR_APPROVAL_SCHEMA.name, approval, constants.COORDINATOR_APPROVAL_SCHEMA.parameters);
+        const approvalHashBuff = sigUtil.TypedDataUtils.hashStruct(constants.COORDINATOR_APPROVAL_SCHEMA.name, approval, { CoordinatorApproval: constants.COORDINATOR_APPROVAL_SCHEMA.parameters });
+        // const approvalHashBuff = sigUtil.typedSignatureHash(typedData);
+        // const typedData = eip712Utils.createTypedData(
+        //     signedTransaction,
+        //     coordinatorAddress,
+        //     txOrigin,
+        //     new BigNumber(approvalExpirationTimeSeconds),
+        // );
+
+
+        // const hash = sigUtil
 
         // Since a coordinator can have multiple feeRecipientAddresses,
         // we need to make sure we issue a signature for each feeRecipientAddress
@@ -619,10 +741,11 @@ export class Handlers {
         const signatures = [];
         const feeRecipientAddressesUsed = Array.from(feeRecipientAddressSet);
         for (const feeRecipientAddress of feeRecipientAddressesUsed) {
-            const feeRecipientIfExists = _.find(
-                this._configs.NETWORK_ID_TO_SETTINGS[networkId].FEE_RECIPIENTS,
-                f => f.ADDRESS === feeRecipientAddress,
-            );
+            // const feeRecipientIfExists = _.find(
+            //     this._configs.NETWORK_ID_TO_SETTINGS[networkId].FEE_RECIPIENTS,
+            //     f => f.ADDRESS === feeRecipientAddress,
+            // );
+            const feeRecipientIfExists = this._configs.NETWORK_ID_TO_SETTINGS[networkId].FEE_RECIPIENTS[0];
             if (feeRecipientIfExists === undefined) {
                 // This error should never be hit
                 throw new Error(
