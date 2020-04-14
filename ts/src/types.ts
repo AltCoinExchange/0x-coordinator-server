@@ -15,6 +15,7 @@ export interface Configs {
 export interface RequestTransactionResponse {
     signatures: string[];
     expirationTimeSeconds: number;
+    zeroxOrderHashes: string[];
 }
 
 export interface CoordinatorApproval {

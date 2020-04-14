@@ -4,11 +4,12 @@ import { orderCalculationUtils, orderHashUtils, signatureUtils, transactionHashU
 import { Web3ProviderEngine } from '@0x/subproviders';
 import { Order, SignatureType, SignedOrder, SignedZeroExTransaction } from '@0x/types';
 import { BigNumber, DecodedCalldata } from '@0x/utils';
+import * as sigUtil from 'eth-sig-util';
 import * as ethUtil from 'ethereumjs-util';
 import * as express from 'express';
 import * as HttpStatus from 'http-status-codes';
 import * as _ from 'lodash';
-import * as sigUtil from 'eth-sig-util';
+
 import { ValidationError, ValidationErrorCodes, ValidationErrorItem } from './errors';
 import { orderModel } from './models/order_model';
 import { transactionModel } from './models/transaction_model';
@@ -219,10 +220,9 @@ export class Handlers {
         }
     }
 
-    private static validateOrderBatch() {
-
-    }
-
+    // private static validateOrderBatch() {
+    //
+    // }
 
     public async postRequestTransactionAsync(req: express.Request, res: express.Response): Promise<void> {
         // 1. Validate request schema
@@ -561,7 +561,7 @@ export class Handlers {
         takerAssetFillAmounts: BigNumber[],
         networkId: number,
     ): Promise<Response> {
-        // await Handlers._validateFillsAllowedOrThrowAsync(signedTransaction, coordinatorOrders, takerAssetFillAmounts);
+        await Handlers._validateFillsAllowedOrThrowAsync(signedTransaction, coordinatorOrders, takerAssetFillAmounts);
         const transactionHash = transactionHashUtils.getTransactionHashHex(signedTransaction);
         const fillRequestReceivedEvent = {
             type: EventTypes.FillRequestReceived,
@@ -615,9 +615,12 @@ export class Handlers {
         networkId: number,
         approvalExpirationTimeSeconds: number,
     ): Promise<RequestTransactionResponse> {
-        const coordinatorAddress = '0x17bce63db58bbf1bded70decd1161ce8f0d4ce4a'; // old approval struct
+        // const coordinatorAddress = '0x17bce63db58bbf1bded70decd1161ce8f0d4ce4a'; // old approval struct
         // const coordinatorAddress = '0xb4260cc0692e2d43c617e002ecb1edc9c5601f25'; // new approval struct, commented out the validation
-
+        // const coordinatorAddress = '0x301B53850A019332F34026F6e9d356f5ca36BE43'; // new approval struct
+        const coordinatorAddress = '0x0aef6721f4e30c8c2496cf060e4818f4374169c6'; // new approval struct
+        const verifyingContractAddress = coordinatorAddress;
+        // console.log('signedTransaction ', signedTransaction);
         // const contractWrappers = this._networkIdToContractWrappers[networkId];
 
         // const constants = {
@@ -651,13 +654,10 @@ export class Handlers {
                     { name: 'approvalExpirationTimeSeconds', type: 'uint256' },
                 ],
             },
+
         };
         // const approvalHashBuff = signTypedDataUtils.generateTypedDataHash(typedData);
-        // const domain = {
-        //     name: constants.COORDINATOR_DOMAIN_NAME,
-        //     version: constants.COORDINATOR_DOMAIN_VERSION,
-        //     verifyingContractAddress,
-        // };
+
         // const transactionHash = transactionHashUtils.getTransactionHashHex(transaction);
         // const approval = {
         //     txOrigin,
@@ -681,7 +681,6 @@ export class Handlers {
         //     new BigNumber(approvalExpirationTimeSeconds),
         // );
 
-
         const zeroxOrderHashes: string[] = coordinatorOrders.map(order => {
             return orderHashUtils.getOrderHashHex(order);
         });
@@ -697,12 +696,30 @@ export class Handlers {
                     { name: 'approvalExpirationTimeSeconds', type: 'uint256' },
                 ],
             },
+            EXCHANGE_DOMAIN_NAME: '0x Protocol',
+            EXCHANGE_DOMAIN_VERSION: '2',
+            DEFAULT_DOMAIN_SCHEMA: {
+                name: 'EIP712Domain',
+                parameters: [
+                    { name: 'name', type: 'string' },
+                    { name: 'version', type: 'string' },
+                    { name: 'verifyingContract', type: 'address' },
+                ],
+            },
+        };
+
+        const domain = {
+            name: constants.COORDINATOR_DOMAIN_NAME,
+            version: constants.COORDINATOR_DOMAIN_VERSION,
+            verifyingContract: verifyingContractAddress,
         };
         const approval = {
             zeroxOrderHashes,
             txOrigin,
             approvalExpirationTimeSeconds,
         };
+
+        console.log('approval ', JSON.stringify(approval));
 
         // const domain = {
         //     name: constants.COORDINATOR_DOMAIN_NAME,
@@ -713,11 +730,32 @@ export class Handlers {
         // TODO: generate previous EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH
         const EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH_v1 = sigUtil.TypedDataUtils.hashType(constants_v1.COORDINATOR_APPROVAL_SCHEMA.name, { CoordinatorApproval: constants_v1.COORDINATOR_APPROVAL_SCHEMA.parameters }).toString('hex');
         const EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH = sigUtil.TypedDataUtils.hashType(constants.COORDINATOR_APPROVAL_SCHEMA.name, { CoordinatorApproval: constants.COORDINATOR_APPROVAL_SCHEMA.parameters }).toString('hex');
+        const encodedApproval = sigUtil.TypedDataUtils.encodeData(constants.COORDINATOR_APPROVAL_SCHEMA.name, approval, { CoordinatorApproval: constants.COORDINATOR_APPROVAL_SCHEMA.parameters }).toString('hex');
 
-        console.log('EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH, EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH_v1', [EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH, EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH_v1]);
+        console.log('EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH, EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH_v1 ', [EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH, EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH_v1]);
+        console.log('encodedApproval ', encodedApproval);
 
         // const typedData = sigUtil.TypedDataUtils.encodeData(constants.COORDINATOR_APPROVAL_SCHEMA.name, approval, constants.COORDINATOR_APPROVAL_SCHEMA.parameters);
         const approvalHashBuff = sigUtil.TypedDataUtils.hashStruct(constants.COORDINATOR_APPROVAL_SCHEMA.name, approval, { CoordinatorApproval: constants.COORDINATOR_APPROVAL_SCHEMA.parameters });
+        console.log('approvalHashBuff ', approvalHashBuff.toString('hex'));
+        // const typedData = eip712Utils.createTypedData(
+        //     constants.COORDINATOR_APPROVAL_SCHEMA.name,
+        //     {
+        //         CoordinatorApproval: constants.COORDINATOR_APPROVAL_SCHEMA.parameters,
+        //     },
+        //     approval as any,
+        //     domain,
+        // );
+        //
+        const typedData = {
+
+            primaryType: constants.COORDINATOR_APPROVAL_SCHEMA.name,
+            types: { EIP712Domain: constants.DEFAULT_DOMAIN_SCHEMA.parameters, CoordinatorApproval: constants.COORDINATOR_APPROVAL_SCHEMA.parameters },
+            domain,
+            message: approval,
+        };
+        const hashBuff = sigUtil.TypedDataUtils.sign(typedData as any);
+
         // const approvalHashBuff = sigUtil.typedSignatureHash(typedData);
         // const typedData = eip712Utils.createTypedData(
         //     signedTransaction,
@@ -725,7 +763,6 @@ export class Handlers {
         //     txOrigin,
         //     new BigNumber(approvalExpirationTimeSeconds),
         // );
-
 
         // const hash = sigUtil
 
@@ -752,7 +789,7 @@ export class Handlers {
                     `Unexpected error: Found feeRecipientAddress ${feeRecipientAddress} that wasn't specified in config.`,
                 );
             }
-            const signature = ethUtil.ecsign(approvalHashBuff, Buffer.from(feeRecipientIfExists.PRIVATE_KEY, 'hex'));
+            const signature = ethUtil.ecsign(hashBuff, Buffer.from(feeRecipientIfExists.PRIVATE_KEY, 'hex'));
             const signatureBuffer = Buffer.concat([
                 ethUtil.toBuffer(signature.v),
                 signature.r,
@@ -766,6 +803,7 @@ export class Handlers {
         return {
             signatures,
             expirationTimeSeconds: approvalExpirationTimeSeconds,
+            zeroxOrderHashes,
         };
     }
 } // tslint:disable:max-file-line-count
