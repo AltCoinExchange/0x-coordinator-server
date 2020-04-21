@@ -220,9 +220,56 @@ export class Handlers {
         }
     }
 
-    // private static validateOrderBatch() {
-    //
-    // }
+    private static async validateOrders(
+        signedTransaction: SignedZeroExTransaction,
+        coordinatorOrders: Order[],
+        takerAssetFillAmounts: BigNumber[],
+    ): Promise<string[]> {
+        // Find all soft-cancelled orders
+        const softCancelledOrderHashes = await orderModel.findSoftCancelledOrdersAsync(coordinatorOrders);
+
+        // Takers can only request to fill an order entirely once. If they do multiple
+        // partial fills, we keep track and make sure they have a sufficient partial fill
+        // amount left for this request to get approved.
+
+        // Verify the fill amounts for all orders that have not been soft-cancelled
+        const availableCoordinatorOrders = _.filter(
+            coordinatorOrders,
+            o => !_.includes(softCancelledOrderHashes, orderHashUtils.getOrderHashHex(o)),
+        );
+
+        // Core assumption. If signature type is `Wallet`, then takerAddress = walletContractAddress.
+        const takerAddress = signedTransaction.signerAddress;
+        const orderHashToFillAmount = await transactionModel.getOrderHashToFillAmountRequestedAsync(
+            availableCoordinatorOrders,
+            takerAddress,
+        );
+        const orderHashesWithInsufficientFillAmounts = [];
+        for (let i = 0; i < availableCoordinatorOrders.length; i++) {
+            const coordinatorOrder = availableCoordinatorOrders[i];
+            const orderHash = orderModel.getHash(coordinatorOrder);
+            const takerAssetFillAmount = takerAssetFillAmounts[i];
+            const previouslyRequestedFillAmount = orderHashToFillAmount[orderHash] || new BigNumber(0);
+            const totalRequestedFillAmount = previouslyRequestedFillAmount.plus(takerAssetFillAmount);
+            if (totalRequestedFillAmount.gt(coordinatorOrder.takerAssetAmount)) {
+                orderHashesWithInsufficientFillAmounts.push(orderHash);
+            }
+        }
+
+        const expiredOrders = [];
+        for (let i = 0; i < availableCoordinatorOrders.length; i++) {
+            const coordinatorOrder = availableCoordinatorOrders[i];
+            const orderHash = orderModel.getHash(coordinatorOrder);
+            const ONE_SECOND_MS = 1000;
+            const currentTime = new BigNumber(Date.now()).div(ONE_SECOND_MS).dp(0, 6);
+            const isExpired = coordinatorOrder.expirationTimeSeconds.isLessThan(currentTime);
+            if (isExpired) {
+                expiredOrders.push(orderHash);
+            }
+        }
+
+        return [...softCancelledOrderHashes, ...orderHashesWithInsufficientFillAmounts, ...expiredOrders];
+    }
 
     public async postRequestTransactionAsync(req: express.Request, res: express.Response): Promise<void> {
         // 1. Validate request schema
@@ -280,17 +327,16 @@ export class Handlers {
         // the same transaction with a different `txOrigin` in an attempt to fill the order through an
         // alternative tx.origin entry-point.
         const transactionHash = transactionHashUtils.getTransactionHashHex(signedTransaction);
-        // const transactionIfExists = await transactionModel.findByHashAsync(transactionHash);
-        // if (transactionIfExists !== undefined) {
-        //     throw new ValidationError([
-        //         {
-        //             field: 'signedTransaction',
-        //             code: ValidationErrorCodes.TransactionAlreadyUsed,
-        //             reason: `A transaction can only be approved once. To request approval to perform the same actions, generate and sign an identical transaction with a different salt value.`,
-        //         },
-        //     ]);
-        // }
-
+        const transactionIfExists = await transactionModel.findByHashAsync(transactionHash);
+        if (transactionIfExists !== undefined) {
+            throw new ValidationError([
+                {
+                    field: 'signedTransaction',
+                    code: ValidationErrorCodes.TransactionAlreadyUsed,
+                    reason: `A transaction can only be approved once. To request approval to perform the same actions, generate and sign an identical transaction with a different salt value.`,
+                },
+            ]);
+        }
 
         // 5. Validate the 0x transaction signature
         const provider = this._networkIdToProvider[networkId];
@@ -300,6 +346,7 @@ export class Handlers {
             signedTransaction.signature,
             signedTransaction.signerAddress,
         );
+
         if (!isValidSignature) {
             throw new ValidationError([
                 {
@@ -309,8 +356,6 @@ export class Handlers {
                 },
             ]);
         }
-
-        // 6. filter out orders which have been reserved in a previous approval
 
         // 6. Handle the request
         switch (decodedCalldata.functionName) {
@@ -561,7 +606,8 @@ export class Handlers {
         takerAssetFillAmounts: BigNumber[],
         networkId: number,
     ): Promise<Response> {
-        await Handlers._validateFillsAllowedOrThrowAsync(signedTransaction, coordinatorOrders, takerAssetFillAmounts);
+        console.log(' _handleFillsAsync coordinatorOrders', coordinatorOrders);
+        let ordersRefusedApproval = await Handlers.validateOrders(signedTransaction, coordinatorOrders, takerAssetFillAmounts);
         const transactionHash = transactionHashUtils.getTransactionHashHex(signedTransaction);
         const fillRequestReceivedEvent = {
             type: EventTypes.FillRequestReceived,
@@ -574,19 +620,26 @@ export class Handlers {
 
         // Check that still a valid fill request after selective delay
         if (this._configs.SELECTIVE_DELAY_MS !== 0) {
-            await Handlers._validateFillsAllowedOrThrowAsync(
+            const invalidOrders = await Handlers.validateOrders(
                 signedTransaction,
                 coordinatorOrders,
                 takerAssetFillAmounts,
             );
+            ordersRefusedApproval = [...ordersRefusedApproval, ...invalidOrders];
         }
 
+        console.log(' _handleFillsAsync ordersRefusedApproval', ordersRefusedApproval);
+        const prunedCoordinatorOrders = coordinatorOrders.filter(coordinatorOrder => {
+            console.log(' !ordersRefusedApproval.includes(orderHashUtils.getOrderHashHex(coordinatorOrder))', !ordersRefusedApproval.includes(orderHashUtils.getOrderHashHex(coordinatorOrder)));
+            return !ordersRefusedApproval.includes(orderHashUtils.getOrderHashHex(coordinatorOrder));
+        });
+        console.log(' _handleFillsAsync prunedCoordinatorOrders', prunedCoordinatorOrders);
         const approvalExpirationTimeSeconds =
             utils.getCurrentTimestampSeconds() + this._configs.EXPIRATION_DURATION_SECONDS;
         const response = await this._generateApprovalSignatureAsync(
             txOrigin,
             signedTransaction,
-            coordinatorOrders,
+            prunedCoordinatorOrders,
             networkId,
             approvalExpirationTimeSeconds,
         );
@@ -598,13 +651,19 @@ export class Handlers {
             response.signatures,
             response.expirationTimeSeconds,
             signedTransaction.signerAddress,
-            coordinatorOrders,
+            prunedCoordinatorOrders,
             takerAssetFillAmounts,
         );
 
         return {
             status: HttpStatus.OK,
-            body: response,
+            // body: response,
+            body: {
+                approvedOrderHashes: response.zeroxOrderHashes,
+                ordersRefusedApproval,
+                signatures: response.signatures,
+                expirationTimeSeconds: response.expirationTimeSeconds,
+            },
         };
     }
 
@@ -750,7 +809,10 @@ export class Handlers {
         const typedData = {
 
             primaryType: constants.COORDINATOR_APPROVAL_SCHEMA.name,
-            types: { EIP712Domain: constants.DEFAULT_DOMAIN_SCHEMA.parameters, CoordinatorApproval: constants.COORDINATOR_APPROVAL_SCHEMA.parameters },
+            types: {
+                EIP712Domain: constants.DEFAULT_DOMAIN_SCHEMA.parameters,
+                CoordinatorApproval: constants.COORDINATOR_APPROVAL_SCHEMA.parameters,
+            },
             domain,
             message: approval,
         };
