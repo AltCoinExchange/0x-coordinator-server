@@ -674,71 +674,11 @@ export class Handlers {
         networkId: number,
         approvalExpirationTimeSeconds: number,
     ): Promise<RequestTransactionResponse> {
-        // const coordinatorAddress = '0x17bce63db58bbf1bded70decd1161ce8f0d4ce4a'; // old approval struct
-        // const coordinatorAddress = '0xb4260cc0692e2d43c617e002ecb1edc9c5601f25'; // new approval struct, commented out the validation
-        // const coordinatorAddress = '0x301B53850A019332F34026F6e9d356f5ca36BE43'; // new approval struct
+
         const coordinatorAddress = '0x0aef6721f4e30c8c2496cf060e4818f4374169c6'; // new approval struct
         const verifyingContractAddress = coordinatorAddress;
-        // console.log('signedTransaction ', signedTransaction);
-        // const contractWrappers = this._networkIdToContractWrappers[networkId];
 
-        // const constants = {
-        //     COORDINATOR_DOMAIN_NAME: '0x Protocol Coordinator',
-        //     COORDINATOR_DOMAIN_VERSION: '1.0.0',
-        //     COORDINATOR_APPROVAL_SCHEMA: {
-        //         name: 'CoordinatorApproval',
-        //         parameters: [
-        //             { name: 'txOrigin', type: 'address' },
-        //             { name: 'transactionHash', type: 'bytes32' },
-        //             { name: 'transactionSignature', type: 'bytes' },
-        //             { name: 'approvalExpirationTimeSeconds', type: 'uint256' },
-        //         ],
-        //     },
-        // };
-        // const typedData = eip712Utils.createCoordinatorApprovalTypedData(
-        //     signedTransaction,
-        //     coordinatorAddress,
-        //     txOrigin,
-        //     new BigNumber(approvalExpirationTimeSeconds),
-        // );
-        const constants_v1 = {
-            COORDINATOR_DOMAIN_NAME: '0x Protocol Coordinator',
-            COORDINATOR_DOMAIN_VERSION: '1.0.0',
-            COORDINATOR_APPROVAL_SCHEMA: {
-                name: 'CoordinatorApproval',
-                parameters: [
-                    { name: 'txOrigin', type: 'address' },
-                    { name: 'transactionHash', type: 'bytes32' },
-                    { name: 'transactionSignature', type: 'bytes' },
-                    { name: 'approvalExpirationTimeSeconds', type: 'uint256' },
-                ],
-            },
 
-        };
-        // const approvalHashBuff = signTypedDataUtils.generateTypedDataHash(typedData);
-
-        // const transactionHash = transactionHashUtils.getTransactionHashHex(transaction);
-        // const approval = {
-        //     txOrigin,
-        //     transactionHash,
-        //     transactionSignature: transaction.signature,
-        //     approvalExpirationTimeSeconds: approvalExpirationTimeSeconds.toString(),
-        // };
-        // const typedData = eip712Utils.createTypedData(
-        //     constants.COORDINATOR_APPROVAL_SCHEMA.name,
-        //     {
-        //         CoordinatorApproval: constants.COORDINATOR_APPROVAL_SCHEMA.parameters,
-        //     },
-        //     approval,
-        //     domain,
-        // );
-        // return typedData;
-        // const typedData = eip712Utils.createTypedData(
-        //     signedTransaction,
-        //     coordinatorAddress,
-        //     txOrigin,
-        //     new BigNumber(approvalExpirationTimeSeconds),
-        // );
 
         const zeroxOrderHashes: string[] = coordinatorOrders.map(order => {
             return orderHashUtils.getOrderHashHex(order);
@@ -778,34 +718,8 @@ export class Handlers {
             approvalExpirationTimeSeconds,
         };
 
-        console.log('approval ', JSON.stringify(approval));
 
-        // const domain = {
-        //     name: constants.COORDINATOR_DOMAIN_NAME,
-        //     version: constants.COORDINATOR_DOMAIN_VERSION,
-        //     verifyingContractAddress,
-        // };
 
-        // TODO: generate previous EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH
-        const EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH_v1 = sigUtil.TypedDataUtils.hashType(constants_v1.COORDINATOR_APPROVAL_SCHEMA.name, { CoordinatorApproval: constants_v1.COORDINATOR_APPROVAL_SCHEMA.parameters }).toString('hex');
-        const EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH = sigUtil.TypedDataUtils.hashType(constants.COORDINATOR_APPROVAL_SCHEMA.name, { CoordinatorApproval: constants.COORDINATOR_APPROVAL_SCHEMA.parameters }).toString('hex');
-        const encodedApproval = sigUtil.TypedDataUtils.encodeData(constants.COORDINATOR_APPROVAL_SCHEMA.name, approval, { CoordinatorApproval: constants.COORDINATOR_APPROVAL_SCHEMA.parameters }).toString('hex');
-
-        console.log('EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH, EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH_v1 ', [EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH, EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH_v1]);
-        console.log('encodedApproval ', encodedApproval);
-
-        // const typedData = sigUtil.TypedDataUtils.encodeData(constants.COORDINATOR_APPROVAL_SCHEMA.name, approval, constants.COORDINATOR_APPROVAL_SCHEMA.parameters);
-        const approvalHashBuff = sigUtil.TypedDataUtils.hashStruct(constants.COORDINATOR_APPROVAL_SCHEMA.name, approval, { CoordinatorApproval: constants.COORDINATOR_APPROVAL_SCHEMA.parameters });
-        console.log('approvalHashBuff ', approvalHashBuff.toString('hex'));
-        // const typedData = eip712Utils.createTypedData(
-        //     constants.COORDINATOR_APPROVAL_SCHEMA.name,
-        //     {
-        //         CoordinatorApproval: constants.COORDINATOR_APPROVAL_SCHEMA.parameters,
-        //     },
-        //     approval as any,
-        //     domain,
-        // );
-        //
         const typedData = {
 
             primaryType: constants.COORDINATOR_APPROVAL_SCHEMA.name,
@@ -816,17 +730,10 @@ export class Handlers {
             domain,
             message: approval,
         };
+
+        // TODO: drop the any
         const hashBuff = sigUtil.TypedDataUtils.sign(typedData as any);
 
-        // const approvalHashBuff = sigUtil.typedSignatureHash(typedData);
-        // const typedData = eip712Utils.createTypedData(
-        //     signedTransaction,
-        //     coordinatorAddress,
-        //     txOrigin,
-        //     new BigNumber(approvalExpirationTimeSeconds),
-        // );
-
-        // const hash = sigUtil
 
         // Since a coordinator can have multiple feeRecipientAddresses,
         // we need to make sure we issue a signature for each feeRecipientAddress
