@@ -1,6 +1,12 @@
 import { getContractAddressesForNetworkOrThrow } from '@0x/contract-addresses';
 import { ContractWrappers, OrderAndTraderInfo } from '@0x/contract-wrappers';
-import { orderCalculationUtils, orderHashUtils, signatureUtils, transactionHashUtils } from '@0x/order-utils';
+import {
+    orderCalculationUtils,
+    orderHashUtils,
+    signatureUtils,
+    transactionHashUtils,
+    ZeroExTransaction,
+} from '@0x/order-utils';
 import { Web3ProviderEngine } from '@0x/subproviders';
 import { Order, SignatureType, SignedOrder, SignedZeroExTransaction } from '@0x/types';
 import { BigNumber, DecodedCalldata } from '@0x/utils';
@@ -220,8 +226,8 @@ export class Handlers {
         }
     }
 
-    private static async validateOrders(
-        signedTransaction: SignedZeroExTransaction,
+    private static async _validateOrdersAsync(
+        signedTransaction: ZeroExTransaction,
         coordinatorOrders: Order[],
         takerAssetFillAmounts: BigNumber[],
     ): Promise<string[]> {
@@ -278,7 +284,7 @@ export class Handlers {
         const networkId = req.networkId;
 
         // 2. Decode the supplied transaction data
-        const signedTransaction: SignedZeroExTransaction = {
+        const signedTransaction: ZeroExTransaction = {
             ...req.body.signedTransaction,
             salt: new BigNumber(req.body.signedTransaction.salt),
         };
@@ -338,24 +344,25 @@ export class Handlers {
             ]);
         }
 
+        // Since we are dropping the tx signature we won't be doing any validation
         // 5. Validate the 0x transaction signature
-        const provider = this._networkIdToProvider[networkId];
-        const isValidSignature = await signatureUtils.isValidSignatureAsync(
-            provider,
-            transactionHash,
-            signedTransaction.signature,
-            signedTransaction.signerAddress,
-        );
-
-        if (!isValidSignature) {
-            throw new ValidationError([
-                {
-                    field: 'signedTransaction.signature',
-                    code: ValidationErrorCodes.InvalidZeroExTransactionSignature,
-                    reason: '0x transaction signature is invalid',
-                },
-            ]);
-        }
+        // const provider = this._networkIdToProvider[networkId];
+        // const isValidSignature = await signatureUtils.isValidSignatureAsync(
+        //     provider,
+        //     transactionHash,
+        //     signedTransaction.signature,
+        //     signedTransaction.signerAddress,
+        // );
+        //
+        // if (!isValidSignature) {
+        //     throw new ValidationError([
+        //         {
+        //             field: 'signedTransaction.signature',
+        //             code: ValidationErrorCodes.InvalidZeroExTransactionSignature,
+        //             reason: '0x transaction signature is invalid',
+        //         },
+        //     ]);
+        // }
 
         // 6. Handle the request
         switch (decodedCalldata.functionName) {
@@ -547,12 +554,12 @@ export class Handlers {
 
     private async _handleCancelsAsync(
         coordinatorOrders: Order[],
-        signedTransaction: SignedZeroExTransaction,
+        zeroExTransaction: ZeroExTransaction,
         networkId: number,
         txOrigin: string,
     ): Promise<Response> {
         for (const order of coordinatorOrders) {
-            if (signedTransaction.signerAddress !== order.makerAddress) {
+            if (zeroExTransaction.signerAddress !== order.makerAddress) {
                 throw new ValidationError([
                     {
                         field: 'signedTransaction.data',
@@ -566,12 +573,12 @@ export class Handlers {
         for (const order of coordinatorOrders) {
             await orderModel.cancelAsync(order);
         }
-        const unsignedTransaction = utils.getUnsignedTransaction(signedTransaction);
+
         const cancelRequestAccepted = {
             type: EventTypes.CancelRequestAccepted,
             data: {
                 orders: coordinatorOrders,
-                transaction: unsignedTransaction,
+                transaction: zeroExTransaction,
             },
         };
         this._broadcastCallback(cancelRequestAccepted, networkId);
@@ -584,7 +591,6 @@ export class Handlers {
         const ZERO = 0;
         const response = await this._generateApprovalSignatureAsync(
             txOrigin,
-            signedTransaction,
             coordinatorOrders,
             networkId,
             ZERO,
@@ -602,13 +608,12 @@ export class Handlers {
     private async _handleFillsAsync(
         coordinatorOrders: Order[],
         txOrigin: string,
-        signedTransaction: SignedZeroExTransaction,
+        zeroExTransaction: ZeroExTransaction,
         takerAssetFillAmounts: BigNumber[],
         networkId: number,
     ): Promise<Response> {
-        console.log(' _handleFillsAsync coordinatorOrders', coordinatorOrders);
-        let ordersRefusedApproval = await Handlers.validateOrders(signedTransaction, coordinatorOrders, takerAssetFillAmounts);
-        const transactionHash = transactionHashUtils.getTransactionHashHex(signedTransaction);
+        let ordersRefusedApproval = await Handlers._validateOrdersAsync(zeroExTransaction, coordinatorOrders, takerAssetFillAmounts);
+        const transactionHash = transactionHashUtils.getTransactionHashHex(zeroExTransaction);
         const fillRequestReceivedEvent = {
             type: EventTypes.FillRequestReceived,
             data: {
@@ -620,25 +625,22 @@ export class Handlers {
 
         // Check that still a valid fill request after selective delay
         if (this._configs.SELECTIVE_DELAY_MS !== 0) {
-            const invalidOrders = await Handlers.validateOrders(
-                signedTransaction,
+            const invalidOrders = await Handlers._validateOrdersAsync(
+                zeroExTransaction,
                 coordinatorOrders,
                 takerAssetFillAmounts,
             );
             ordersRefusedApproval = [...ordersRefusedApproval, ...invalidOrders];
         }
 
-        console.log(' _handleFillsAsync ordersRefusedApproval', ordersRefusedApproval);
         const prunedCoordinatorOrders = coordinatorOrders.filter(coordinatorOrder => {
-            console.log(' !ordersRefusedApproval.includes(orderHashUtils.getOrderHashHex(coordinatorOrder))', !ordersRefusedApproval.includes(orderHashUtils.getOrderHashHex(coordinatorOrder)));
             return !ordersRefusedApproval.includes(orderHashUtils.getOrderHashHex(coordinatorOrder));
         });
-        console.log(' _handleFillsAsync prunedCoordinatorOrders', prunedCoordinatorOrders);
+
         const approvalExpirationTimeSeconds =
             utils.getCurrentTimestampSeconds() + this._configs.EXPIRATION_DURATION_SECONDS;
         const response = await this._generateApprovalSignatureAsync(
             txOrigin,
-            signedTransaction,
             prunedCoordinatorOrders,
             networkId,
             approvalExpirationTimeSeconds,
@@ -650,7 +652,7 @@ export class Handlers {
             txOrigin,
             response.signatures,
             response.expirationTimeSeconds,
-            signedTransaction.signerAddress,
+            zeroExTransaction.signerAddress,
             prunedCoordinatorOrders,
             takerAssetFillAmounts,
         );
@@ -669,7 +671,6 @@ export class Handlers {
 
     private async _generateApprovalSignatureAsync(
         txOrigin: string,
-        signedTransaction: SignedZeroExTransaction,
         coordinatorOrders: Order[],
         networkId: number,
         approvalExpirationTimeSeconds: number,
@@ -677,7 +678,6 @@ export class Handlers {
 
         const coordinatorAddress = '0x0aef6721f4e30c8c2496cf060e4818f4374169c6'; // new approval struct
         const verifyingContractAddress = coordinatorAddress;
-
 
 
         const zeroxOrderHashes: string[] = coordinatorOrders.map(order => {
@@ -717,7 +717,6 @@ export class Handlers {
             txOrigin,
             approvalExpirationTimeSeconds,
         };
-
 
 
         const typedData = {

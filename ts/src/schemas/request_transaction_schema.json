@@ -1,13 +1,12 @@
 {
     "id": "/requestTransactionSchema",
     "properties": {
-        "signedTransaction": {
+        "zeroExTransaction": {
             "properties": {
                 "verifyingContractAddress": { "$ref": "/addressSchema" },
                 "data": { "$ref": "/hexSchema" },
                 "signerAddress": { "$ref": "/addressSchema" },
                 "salt": { "$ref": "/wholeNumberSchema" },
-                "signature": { "$ref": "/hexSchema" }
             },
             "required": ["verifyingContractAddress", "data", "salt", "signerAddress", "signature"],
             "type": "object"
