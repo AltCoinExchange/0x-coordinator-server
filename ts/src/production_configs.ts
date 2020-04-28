@@ -2,7 +2,7 @@ import * as _ from 'lodash';
 
 export const configs = {
     // Network port to listen on
-    HTTP_PORT: process.env.COORDINATOR_HTTP_PORT === undefined ? 3000 : _.parseInt(process.env.COORDINATOR_HTTP_PORT),
+    HTTP_PORT: process.env.COORDINATOR_HTTP_PORT === undefined ? 3001 : _.parseInt(process.env.COORDINATOR_HTTP_PORT),
     // Ethereum RPC url
     NETWORK_ID_TO_SETTINGS: {
         // 1: {
