@@ -78,6 +78,13 @@ export const utils = {
     getUnmarshalledObject(o: any): any {
         return JSON.parse(JSON.stringify(o));
     },
+    // TODO: maybe?
+    getOrderBatchHashBuffer(): any {
+
+    },
+    getOrderBatchHashHex(): any {
+        // ethUtil.sha3();
+    },
 };
 
 function schemaValidationErrorToValidationErrorItem(schemaValidationError: SchemaValidationError): ValidationErrorItem {

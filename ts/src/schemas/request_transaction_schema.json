@@ -1,27 +1,15 @@
 {
     "id": "/requestTransactionSchema",
     "properties": {
-        "signedTransaction": {
+        "zeroExTransaction": {
             "properties": {
-                "salt": { "$ref": "/wholeNumberSchema" },
-                "expirationTimeSeconds": { "$ref": "/wholeNumberSchema" },
-                "gasPrice": { "$ref": "/wholeNumberSchema" },
-                "signerAddress": { "$ref": "/addressSchema" },
+                "verifyingContractAddress": { "$ref": "/addressSchema" },
                 "data": { "$ref": "/hexSchema" },
-                "domain": {
-                    "name": {
-                        "type": "string"
-                    },
-                    "version": {
-                        "type": "string"
-                    },
-                    "chainId": { "$ref": "/wholeNumberSchema" },
-                    "verifyingContract": { "$ref": "/addressSchema" },
-                    "required": ["chainId", "verifyingContract"],
-                    "type": "object"
-                }
+                "signerAddress": { "$ref": "/addressSchema" },
+                "salt": { "$ref": "/wholeNumberSchema" },
+                "signature": { "$ref": "/hexSchema" }
             },
-            "required": ["salt", "expirationTimeSeconds", "gasPrice", "signerAddress", "data", "domain"],
+            "required": ["verifyingContractAddress", "data", "salt", "signerAddress", "signature"],
             "type": "object"
         },
         "txOrigin": {

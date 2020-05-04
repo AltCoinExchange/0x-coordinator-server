@@ -208,7 +208,7 @@ export class Handlers {
         const chainId = req.chainId;
 
         // 2. Decode the supplied transaction data
-        const signedTransaction: SignedZeroExTransaction = {
+        const signedTransaction: ZeroExTransaction = {
             ...req.body.signedTransaction,
             salt: new BigNumber(req.body.signedTransaction.salt),
             expirationTimeSeconds: new BigNumber(req.body.signedTransaction.expirationTimeSeconds),
@@ -266,6 +266,7 @@ export class Handlers {
             ]);
         }
 
+        // Since we are dropping the tx signature we won't be doing any validation
         // 5. Validate the 0x transaction signature
         const isValidSignature = await this._chainIdToContractWrappers[chainId].exchange
             .isValidHashSignature(transactionHash, signedTransaction.signerAddress, signedTransaction.signature)
@@ -522,7 +523,7 @@ export class Handlers {
         txOrigin: string,
     ): Promise<Response> {
         for (const order of coordinatorOrders) {
-            if (signedTransaction.signerAddress !== order.makerAddress) {
+            if (zeroExTransaction.signerAddress !== order.makerAddress) {
                 throw new ValidationError([
                     {
                         field: 'signedTransaction.data',
@@ -536,12 +537,12 @@ export class Handlers {
         for (const order of coordinatorOrders) {
             await orderModel.cancelAsync(order);
         }
-        const unsignedTransaction = utils.getUnsignedTransaction(signedTransaction);
+
         const cancelRequestAccepted = {
             type: EventTypes.CancelRequestAccepted,
             data: {
                 orders: coordinatorOrders,
-                transaction: unsignedTransaction,
+                transaction: zeroExTransaction,
             },
         };
         this._broadcastCallback(cancelRequestAccepted, chainId);
@@ -554,7 +555,6 @@ export class Handlers {
         const ZERO = 0;
         const response = await this._generateApprovalSignatureAsync(
             txOrigin,
-            signedTransaction,
             coordinatorOrders,
             chainId,
             ZERO,
@@ -571,13 +571,12 @@ export class Handlers {
     private async _handleFillsAsync(
         coordinatorOrders: Order[],
         txOrigin: string,
-        signedTransaction: SignedZeroExTransaction,
+        zeroExTransaction: ZeroExTransaction,
         takerAssetFillAmounts: BigNumber[],
         chainId: number,
     ): Promise<Response> {
-        await Handlers._validateFillsAllowedOrThrowAsync(signedTransaction, coordinatorOrders, takerAssetFillAmounts);
-
-        const transactionHash = transactionHashUtils.getTransactionHashHex(signedTransaction);
+        let ordersRefusedApproval = await Handlers._validateOrdersAsync(zeroExTransaction, coordinatorOrders, takerAssetFillAmounts);
+        const transactionHash = transactionHashUtils.getTransactionHashHex(zeroExTransaction);
         const fillRequestReceivedEvent = {
             type: EventTypes.FillRequestReceived,
             data: {
@@ -589,12 +588,17 @@ export class Handlers {
 
         // Check that still a valid fill request after selective delay
         if (this._configs.SELECTIVE_DELAY_MS !== 0) {
-            await Handlers._validateFillsAllowedOrThrowAsync(
-                signedTransaction,
+            const invalidOrders = await Handlers._validateOrdersAsync(
+                zeroExTransaction,
                 coordinatorOrders,
                 takerAssetFillAmounts,
             );
+            ordersRefusedApproval = [...ordersRefusedApproval, ...invalidOrders];
         }
+
+        const prunedCoordinatorOrders = coordinatorOrders.filter(coordinatorOrder => {
+            return !ordersRefusedApproval.includes(orderHashUtils.getOrderHashHex(coordinatorOrder));
+        });
 
         // Compute approval expiration time and assert transaction expiration
         const approvalExpirationTimeSeconds =
@@ -612,8 +616,7 @@ export class Handlers {
         // Generate response and record in DB
         const response = await this._generateApprovalSignatureAsync(
             txOrigin,
-            signedTransaction,
-            coordinatorOrders,
+            prunedCoordinatorOrders,
             chainId,
             approvalExpirationTimeSeconds,
         );
@@ -622,30 +625,87 @@ export class Handlers {
             txOrigin,
             response.signatures,
             response.expirationTimeSeconds,
-            signedTransaction.signerAddress,
-            coordinatorOrders,
+            zeroExTransaction.signerAddress,
+            prunedCoordinatorOrders,
             takerAssetFillAmounts,
         );
 
         return {
             status: HttpStatus.OK,
-            body: response,
+            // body: response,
+            body: {
+                approvedOrderHashes: response.zeroxOrderHashes,
+                ordersRefusedApproval,
+                signatures: response.signatures,
+                expirationTimeSeconds: response.expirationTimeSeconds,
+            },
         };
     }
+
     private async _generateApprovalSignatureAsync(
         txOrigin: string,
-        signedTransaction: SignedZeroExTransaction,
         coordinatorOrders: Order[],
         chainId: number,
         approvalExpirationTimeSeconds: number,
     ): Promise<RequestTransactionResponse> {
-        const contractWrappers = this._chainIdToContractWrappers[chainId];
-        const typedData = await eip712Utils.createCoordinatorApprovalTypedDataAsync(
-            signedTransaction,
-            contractWrappers.coordinator.address,
+
+        const coordinatorAddress = '0x0aef6721f4e30c8c2496cf060e4818f4374169c6'; // new approval struct
+        const verifyingContractAddress = coordinatorAddress;
+
+
+        const zeroxOrderHashes: string[] = coordinatorOrders.map(order => {
+            return orderHashUtils.getOrderHashHex(order);
+        });
+
+        const constants = {
+            COORDINATOR_DOMAIN_NAME: '0x Protocol Coordinator',
+            COORDINATOR_DOMAIN_VERSION: '1.0.0',
+            COORDINATOR_APPROVAL_SCHEMA: {
+                name: 'CoordinatorApproval',
+                parameters: [
+                    { name: 'zeroxOrderHashes', type: 'bytes32[]' },
+                    { name: 'txOrigin', type: 'address' },
+                    { name: 'approvalExpirationTimeSeconds', type: 'uint256' },
+                ],
+            },
+            EXCHANGE_DOMAIN_NAME: '0x Protocol',
+            EXCHANGE_DOMAIN_VERSION: '2',
+            DEFAULT_DOMAIN_SCHEMA: {
+                name: 'EIP712Domain',
+                parameters: [
+                    { name: 'name', type: 'string' },
+                    { name: 'version', type: 'string' },
+                    { name: 'verifyingContract', type: 'address' },
+                ],
+            },
+        };
+
+        const domain = {
+            name: constants.COORDINATOR_DOMAIN_NAME,
+            version: constants.COORDINATOR_DOMAIN_VERSION,
+            verifyingContract: verifyingContractAddress,
+        };
+        const approval = {
+            zeroxOrderHashes,
             txOrigin,
-        );
-        const approvalHashBuff = signTypedDataUtils.generateTypedDataHash(typedData);
+            approvalExpirationTimeSeconds,
+        };
+
+
+        const typedData = {
+
+            primaryType: constants.COORDINATOR_APPROVAL_SCHEMA.name,
+            types: {
+                EIP712Domain: constants.DEFAULT_DOMAIN_SCHEMA.parameters,
+                CoordinatorApproval: constants.COORDINATOR_APPROVAL_SCHEMA.parameters,
+            },
+            domain,
+            message: approval,
+        };
+
+        // TODO: drop the any
+        const hashBuff = sigUtil.TypedDataUtils.sign(typedData as any);
+
 
         // Since a coordinator can have multiple feeRecipientAddresses,
         // we need to make sure we issue a signature for each feeRecipientAddress
@@ -659,17 +719,18 @@ export class Handlers {
         const signatures = [];
         const feeRecipientAddressesUsed = Array.from(feeRecipientAddressSet);
         for (const feeRecipientAddress of feeRecipientAddressesUsed) {
-            const feeRecipientIfExists = _.find(
-                this._configs.CHAIN_ID_TO_SETTINGS[chainId].FEE_RECIPIENTS,
-                f => f.ADDRESS === feeRecipientAddress,
-            );
+            // const feeRecipientIfExists = _.find(
+            //     this._configs.NETWORK_ID_TO_SETTINGS[networkId].FEE_RECIPIENTS,
+            //     f => f.ADDRESS === feeRecipientAddress,
+            // );
+            const feeRecipientIfExists = this._configs.NETWORK_ID_TO_SETTINGS[networkId].FEE_RECIPIENTS[0];
             if (feeRecipientIfExists === undefined) {
                 // This error should never be hit
                 throw new Error(
                     `Unexpected error: Found feeRecipientAddress ${feeRecipientAddress} that wasn't specified in config.`,
                 );
             }
-            const signature = ethUtil.ecsign(approvalHashBuff, Buffer.from(feeRecipientIfExists.PRIVATE_KEY, 'hex'));
+            const signature = ethUtil.ecsign(hashBuff, Buffer.from(feeRecipientIfExists.PRIVATE_KEY, 'hex'));
             const signatureBuffer = Buffer.concat([
                 ethUtil.toBuffer(signature.v),
                 signature.r,
@@ -683,6 +744,7 @@ export class Handlers {
         return {
             signatures,
             expirationTimeSeconds: approvalExpirationTimeSeconds,
+            zeroxOrderHashes,
         };
     }
 } // tslint:disable:max-file-line-count
