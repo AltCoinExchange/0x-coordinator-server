@@ -5,8 +5,6 @@ export const configs = {
     HTTP_PORT: process.env.COORDINATOR_HTTP_PORT === undefined ? 3001 : _.parseInt(process.env.COORDINATOR_HTTP_PORT),
     // Ethereum RPC url
     CHAIN_ID_TO_SETTINGS: {
-        1: {
-    NETWORK_ID_TO_SETTINGS: {
         // 1: {
         //     FEE_RECIPIENTS: [
         //         {
@@ -27,7 +25,8 @@ export const configs = {
             // CHAIN_ID_TO_CONTRACT_ADDRESSES: '0xb4260cc0692e2d43c617e002ecb1edc9c5601f25', // new approval struct, commented out the validation
             // CHAIN_ID_TO_CONTRACT_ADDRESSES: '0x2e7e7ebb9edaec573846c3fd41bc5f0bf798211f', // new approval struct
             // CHAIN_ID_TO_CONTRACT_ADDRESSES: '0xd3a95169dfca48c0456430b67b598185a5471434', // new approval struct
-            CHAIN_ID_TO_CONTRACT_ADDRESSES: '0x0aef6721f4e30c8c2496cf060e4818f4374169c6', // new approval struct
+
+            COORDINATOR_CONTRACT_ADDRESS: '0x0aef6721f4e30c8c2496cf060e4818f4374169c6', // new approval struct
             RPC_URL: process.env.KOVAN_RPC_URL || 'https://kovan.infura.io/v3/bc9118cc927a492ea1e57e4636e63b01',
         },
     },

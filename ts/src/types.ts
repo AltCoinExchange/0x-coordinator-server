@@ -7,6 +7,7 @@ export interface Configs {
     HTTP_PORT: number;
     CHAIN_ID_TO_SETTINGS: ChainIdToNetworkSpecificSettings;
     CHAIN_ID_TO_CONTRACT_ADDRESSES?: ChainIdToContractAddresses;
+    COORDINATOR_CONTRACT_ADDRESS?: string;
     SELECTIVE_DELAY_MS: number;
     EXPIRATION_DURATION_SECONDS: number;
 }

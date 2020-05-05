@@ -13,7 +13,7 @@ export function urlParamsParsing(
     _res: express.Response,
     next: express.NextFunction,
 ): void {
-    const chainId = parseChainId(supportedChainIds, req.query.chainId);
+    const chainId = parseChainId(supportedChainIds, req.query.chainId as any);
     // HACK(leo): This is the recommended way to pass data from middlewares on. It's not beautiful nor fully type-safe.
     req.chainId = chainId;
     next();

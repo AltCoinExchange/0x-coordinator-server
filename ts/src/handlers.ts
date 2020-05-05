@@ -1,16 +1,17 @@
 import { getContractAddressesForChainOrThrow } from '@0x/contract-addresses';
 import { ContractWrappers } from '@0x/contract-wrappers';
 import { orderHashUtils, transactionHashUtils } from '@0x/contracts-test-utils';
-import { eip712Utils, orderCalculationUtils } from '@0x/order-utils';
+import { orderCalculationUtils, ZeroExTransaction } from '@0x/order-utils';
 import { Web3ProviderEngine } from '@0x/subproviders';
-import { Order, SignatureType, SignedOrder, SignedZeroExTransaction } from '@0x/types';
-import { BigNumber, DecodedCalldata, signTypedDataUtils } from '@0x/utils';
+import { Order, SignatureType, SignedOrder } from '@0x/types';
+import { BigNumber, DecodedCalldata } from '@0x/utils';
 import * as ethUtil from 'ethereumjs-util';
+import * as sigUtil from 'eth-sig-util';
 import * as express from 'express';
 import * as HttpStatus from 'http-status-codes';
 import * as _ from 'lodash';
 
-import { ValidationError, ValidationErrorCodes, ValidationErrorItem } from './errors';
+import { ValidationError, ValidationErrorCodes } from './errors';
 import { orderModel } from './models/order_model';
 import { transactionModel } from './models/transaction_model';
 import * as requestTransactionSchema from './schemas/request_transaction_schema.json';
@@ -29,12 +30,33 @@ import {
 } from './types';
 import { utils } from './utils';
 
+
 const NULL_ADDRESS = '0x0000000000000000000000000000000000000000';
 
 export class Handlers {
     private readonly _broadcastCallback: BroadcastCallback;
     private readonly _chainIdToContractWrappers: ChainIdToContractWrappers;
     private readonly _configs: Configs;
+    private _cordinatorAddress: string | undefined;
+
+    constructor(chainIdToProvider: ChainIdToProvider, configs: Configs, broadcastCallback: BroadcastCallback) {
+        this._broadcastCallback = broadcastCallback;
+        this._configs = configs;
+        this._chainIdToContractWrappers = {};
+        _.each(chainIdToProvider, (provider: Web3ProviderEngine, chainIdStr: string) => {
+            const chainId = _.parseInt(chainIdStr);
+            const contractAddresses = configs.CHAIN_ID_TO_CONTRACT_ADDRESSES
+                ? configs.CHAIN_ID_TO_CONTRACT_ADDRESSES[chainId]
+                : undefined;
+            this._cordinatorAddress = configs.COORDINATOR_CONTRACT_ADDRESS;
+            const contractWrappers = new ContractWrappers(provider, {
+                chainId,
+                contractAddresses,
+            });
+            this._chainIdToContractWrappers[chainId] = contractWrappers;
+        });
+    }
+
     private static _calculateRemainingFillableTakerAssetAmount(
         signedOrder: SignedOrder,
         orderAndTraderInfo: OrderAndTraderInfo,
@@ -87,6 +109,7 @@ export class Handlers {
         const maxTakerAssetFillAmount = BigNumber.min(...minSet);
         return maxTakerAssetFillAmount;
     }
+
     private static _getOrdersFromDecodedCalldata(decodedCalldata: DecodedCalldata, chainId: number): Order[] {
         const contractAddresses = getContractAddressesForChainOrThrow(chainId);
 
@@ -126,11 +149,12 @@ export class Handlers {
                 throw utils.getInvalidFunctionCallError(decodedCalldata.functionName);
         }
     }
-    private static async _validateFillsAllowedOrThrowAsync(
-        signedTransaction: SignedZeroExTransaction,
+
+    private static async _validateOrdersAsync(
+        signedTransaction: ZeroExTransaction,
         coordinatorOrders: Order[],
         takerAssetFillAmounts: BigNumber[],
-    ): Promise<void> {
+    ): Promise<string[]> {
         // Find all soft-cancelled orders
         const softCancelledOrderHashes = await orderModel.findSoftCancelledOrdersAsync(coordinatorOrders);
 
@@ -161,46 +185,22 @@ export class Handlers {
                 orderHashesWithInsufficientFillAmounts.push(orderHash);
             }
         }
-        const validationErrors: ValidationErrorItem[] = [];
-        // If any soft-cancelled orders, include validation error with their orderHashes
-        if (softCancelledOrderHashes.length > 0) {
-            validationErrors.push({
-                field: 'signedTransaction.data',
-                code: ValidationErrorCodes.IncludedOrderAlreadySoftCancelled,
-                reason: `Cannot fill orders because some have already been soft-cancelled`,
-                entities: softCancelledOrderHashes,
-            });
+
+        const expiredOrders = [];
+        for (let i = 0; i < availableCoordinatorOrders.length; i++) {
+            const coordinatorOrder = availableCoordinatorOrders[i];
+            const orderHash = orderModel.getHash(coordinatorOrder);
+            const ONE_SECOND_MS = 1000;
+            const currentTime = new BigNumber(Date.now()).div(ONE_SECOND_MS).dp(0, 6);
+            const isExpired = coordinatorOrder.expirationTimeSeconds.isLessThan(currentTime);
+            if (isExpired) {
+                expiredOrders.push(orderHash);
+            }
         }
-        // If any orders with insufficient fill amounts left, include validation error with their orderHashes
-        if (orderHashesWithInsufficientFillAmounts.length > 0) {
-            validationErrors.push({
-                field: 'signedTransaction.data',
-                code: ValidationErrorCodes.FillRequestsExceededTakerAssetAmount,
-                reason: `A taker can only request to fill an order fully once. This request includes orders which would exceed this limit.`,
-                entities: orderHashesWithInsufficientFillAmounts,
-            });
-        }
-        // If any failure conditions (soft-cancels or lacking remaining fill amounts), return the relevant errors
-        if (validationErrors.length > 0) {
-            throw new ValidationError(validationErrors);
-        }
+
+        return [...softCancelledOrderHashes, ...orderHashesWithInsufficientFillAmounts, ...expiredOrders];
     }
-    constructor(chainIdToProvider: ChainIdToProvider, configs: Configs, broadcastCallback: BroadcastCallback) {
-        this._broadcastCallback = broadcastCallback;
-        this._configs = configs;
-        this._chainIdToContractWrappers = {};
-        _.each(chainIdToProvider, (provider: Web3ProviderEngine, chainIdStr: string) => {
-            const chainId = _.parseInt(chainIdStr);
-            const contractAddresses = configs.CHAIN_ID_TO_CONTRACT_ADDRESSES
-                ? configs.CHAIN_ID_TO_CONTRACT_ADDRESSES[chainId]
-                : undefined;
-            const contractWrappers = new ContractWrappers(provider, {
-                chainId,
-                contractAddresses,
-            });
-            this._chainIdToContractWrappers[chainId] = contractWrappers;
-        });
-    }
+
     public async postRequestTransactionAsync(req: express.Request, res: express.Response): Promise<void> {
         // 1. Validate request schema
         utils.validateSchema(req.body, requestTransactionSchema);
@@ -230,16 +230,17 @@ export class Handlers {
         }
 
         // 3. Check if at least one order in calldata has the Coordinator's feeRecipientAddress
-        let orders: Order[] = [];
-        orders = Handlers._getOrdersFromDecodedCalldata(decodedCalldata, chainId);
-        const coordinatorOrders = _.filter(orders, order => {
-            const coordinatorFeeRecipients = this._configs.CHAIN_ID_TO_SETTINGS[chainId].FEE_RECIPIENTS;
-            const coordinatorFeeRecipientAddresses = _.map(
-                coordinatorFeeRecipients,
-                feeRecipient => feeRecipient.ADDRESS,
-            );
-            return _.includes(coordinatorFeeRecipientAddresses, order.feeRecipientAddress);
-        });
+        // let orders: Order[] = [];
+        // orders = Handlers._getOrdersFromDecodedCalldata(decodedCalldata, chainId);
+        const coordinatorOrders = Handlers._getOrdersFromDecodedCalldata(decodedCalldata, chainId);
+        // const coordinatorOrders = _.filter(orders, order => {
+        //     const coordinatorFeeRecipients = this._configs.CHAIN_ID_TO_SETTINGS[chainId].FEE_RECIPIENTS;
+        //     const coordinatorFeeRecipientAddresses = _.map(
+        //         coordinatorFeeRecipients,
+        //         feeRecipient => feeRecipient.ADDRESS,
+        //     );
+        //     return _.includes(coordinatorFeeRecipientAddresses, order.feeRecipientAddress);
+        // });
         if (_.isEmpty(coordinatorOrders)) {
             throw new ValidationError([
                 {
@@ -268,18 +269,18 @@ export class Handlers {
 
         // Since we are dropping the tx signature we won't be doing any validation
         // 5. Validate the 0x transaction signature
-        const isValidSignature = await this._chainIdToContractWrappers[chainId].exchange
-            .isValidHashSignature(transactionHash, signedTransaction.signerAddress, signedTransaction.signature)
-            .callAsync();
-        if (!isValidSignature) {
-            throw new ValidationError([
-                {
-                    field: 'signedTransaction.signature',
-                    code: ValidationErrorCodes.InvalidZeroExTransactionSignature,
-                    reason: '0x transaction signature is invalid',
-                },
-            ]);
-        }
+        // const isValidSignature = await this._chainIdToContractWrappers[chainId].exchange
+        //     .isValidHashSignature(transactionHash, signedTransaction.signerAddress, signedTransaction.signature)
+        //     .callAsync();
+        // if (!isValidSignature) {
+        //     throw new ValidationError([
+        //         {
+        //             field: 'signedTransaction.signature',
+        //             code: ValidationErrorCodes.InvalidZeroExTransactionSignature,
+        //             reason: '0x transaction signature is invalid',
+        //         },
+        //     ]);
+        // }
 
         // 6. Handle the request
         switch (decodedCalldata.functionName) {
@@ -338,6 +339,7 @@ export class Handlers {
                 throw utils.getInvalidFunctionCallError(decodedCalldata.functionName);
         }
     }
+
     // tslint:disable-next-line:prefer-function-over-method
     public async postSoftCancelsAsync(req: express.Request, res: express.Response): Promise<void> {
         utils.validateSchema(req.body, softCancelsSchema);
@@ -347,6 +349,7 @@ export class Handlers {
             orderHashes: softCancelsFound,
         });
     }
+
     private async _getTakerAssetFillAmountsFromDecodedCalldataAsync(
         decodedCalldata: DecodedCalldata,
         takerAddress: string,
@@ -390,6 +393,7 @@ export class Handlers {
         }
         return takerAssetFillAmounts;
     }
+
     private async _extractTakerAssetFillAmountsFromMarketSellOrdersAsync(
         decodedCalldata: DecodedCalldata,
         takerAddress: string,
@@ -422,6 +426,7 @@ export class Handlers {
 
         return takerAssetFillAmounts;
     }
+
     private async _extractTakerAssetFillAmountsFromMarketBuyOrdersAsync(
         decodedCalldata: DecodedCalldata,
         takerAddress: string,
@@ -466,6 +471,7 @@ export class Handlers {
 
         return takerAssetFillAmounts;
     }
+
     private async _getBatchOrderAndTraderInfoAsync(
         signedOrders: SignedOrder[],
         takerAddress: string,
@@ -516,9 +522,10 @@ export class Handlers {
         }));
         return orderAndTraderInfos;
     }
+
     private async _handleCancelsAsync(
         coordinatorOrders: Order[],
-        signedTransaction: SignedZeroExTransaction,
+        zeroExTransaction: ZeroExTransaction,
         chainId: number,
         txOrigin: string,
     ): Promise<Response> {
@@ -568,6 +575,7 @@ export class Handlers {
             },
         };
     }
+
     private async _handleFillsAsync(
         coordinatorOrders: Order[],
         txOrigin: string,
@@ -603,7 +611,7 @@ export class Handlers {
         // Compute approval expiration time and assert transaction expiration
         const approvalExpirationTimeSeconds =
             utils.getCurrentTimestampSeconds() + this._configs.EXPIRATION_DURATION_SECONDS;
-        if (signedTransaction.expirationTimeSeconds.gt(approvalExpirationTimeSeconds)) {
+        if (zeroExTransaction.expirationTimeSeconds.gt(approvalExpirationTimeSeconds)) {
             throw new ValidationError([
                 {
                     field: 'signedTransaction.expirationTimeSeconds',
@@ -649,8 +657,7 @@ export class Handlers {
         approvalExpirationTimeSeconds: number,
     ): Promise<RequestTransactionResponse> {
 
-        const coordinatorAddress = '0x0aef6721f4e30c8c2496cf060e4818f4374169c6'; // new approval struct
-        const verifyingContractAddress = coordinatorAddress;
+        const verifyingContractAddress = this._cordinatorAddress;
 
 
         const zeroxOrderHashes: string[] = coordinatorOrders.map(order => {
@@ -723,7 +730,7 @@ export class Handlers {
             //     this._configs.NETWORK_ID_TO_SETTINGS[networkId].FEE_RECIPIENTS,
             //     f => f.ADDRESS === feeRecipientAddress,
             // );
-            const feeRecipientIfExists = this._configs.NETWORK_ID_TO_SETTINGS[networkId].FEE_RECIPIENTS[0];
+            const feeRecipientIfExists = this._configs.CHAIN_ID_TO_SETTINGS[chainId].FEE_RECIPIENTS[0];
             if (feeRecipientIfExists === undefined) {
                 // This error should never be hit
                 throw new Error(
