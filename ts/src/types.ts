@@ -13,6 +13,7 @@ export interface Configs {
 }
 
 export interface RequestTransactionResponse {
+    approvalHash: string;
     signatures: string[];
     expirationTimeSeconds: number;
     zeroxOrderHashes: string[];
@@ -47,10 +48,13 @@ export interface FillRequestAcceptedEvent {
     type: EventTypes;
     data: {
         functionName: string;
-        orders: Order[];
-        txOrigin: string;
-        signedTransaction: ZeroExTransaction;
-        approvalSignatures: string[];
+        takerAssetFillAmounts: any[];
+        // orders: Order[];
+        order: Order;
+        approvedOrderHashes: string[];
+        // txOrigin: string;
+        // signedTransaction: ZeroExTransaction;
+        // approvalSignatures: string[];
         approvalExpirationTimeSeconds: number;
     };
 }
@@ -86,6 +90,7 @@ export interface FeeRecipient {
 export interface NetworkSpecificSettings {
     FEE_RECIPIENTS: FeeRecipient[];
     RPC_URL: string;
+    COORDINATOR_CONTRACT_ADDRESS: string;
 }
 
 export interface ChainIdToContractAddresses {

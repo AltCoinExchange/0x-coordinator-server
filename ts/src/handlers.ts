@@ -48,7 +48,8 @@ export class Handlers {
             const contractAddresses = configs.CHAIN_ID_TO_CONTRACT_ADDRESSES
                 ? configs.CHAIN_ID_TO_CONTRACT_ADDRESSES[chainId]
                 : undefined;
-            this._cordinatorAddress = configs.COORDINATOR_CONTRACT_ADDRESS;
+            console.log('chainId ', chainId);
+            this._cordinatorAddress = configs.CHAIN_ID_TO_SETTINGS[chainId].COORDINATOR_CONTRACT_ADDRESS;
             const contractWrappers = new ContractWrappers(provider, {
                 chainId,
                 contractAddresses,
@@ -175,15 +176,21 @@ export class Handlers {
             takerAddress,
         );
         const orderHashesWithInsufficientFillAmounts = [];
+        const redundantOrders = [];
         for (let i = 0; i < availableCoordinatorOrders.length; i++) {
             const coordinatorOrder = availableCoordinatorOrders[i];
             const orderHash = orderModel.getHash(coordinatorOrder);
             const takerAssetFillAmount = takerAssetFillAmounts[i];
+            if (takerAssetFillAmount.eq(new BigNumber(0))) {
+                redundantOrders.push(orderHash);
+                continue;
+            }
             const previouslyRequestedFillAmount = orderHashToFillAmount[orderHash] || new BigNumber(0);
             const totalRequestedFillAmount = previouslyRequestedFillAmount.plus(takerAssetFillAmount);
             if (totalRequestedFillAmount.gt(coordinatorOrder.takerAssetAmount)) {
                 orderHashesWithInsufficientFillAmounts.push(orderHash);
             }
+
         }
 
         const expiredOrders = [];
@@ -198,7 +205,8 @@ export class Handlers {
             }
         }
 
-        return [...softCancelledOrderHashes, ...orderHashesWithInsufficientFillAmounts, ...expiredOrders];
+
+        return [...softCancelledOrderHashes, ...orderHashesWithInsufficientFillAmounts, ...expiredOrders, ...redundantOrders];
     }
 
     public async postRequestTransactionAsync(req: express.Request, res: express.Response): Promise<void> {
@@ -311,15 +319,19 @@ export class Handlers {
                 const fillRequestAcceptedEvent = {
                     type: EventTypes.FillRequestAccepted,
                     data: {
+                        approvalHash: response.body.approvalHash,
                         functionName: decodedCalldata.functionName,
-                        orders: coordinatorOrders,
-                        txOrigin,
-                        signedTransaction,
-                        approvalSignatures: response.body.signatures,
+                        // orders: coordinatorOrders,
+                        order: coordinatorOrders[0],
+                        takerAssetFillAmounts,
+                        approvedOrderHashes: response.body.approvedOrderHashes,
+                        // txOrigin,
+                        // signedTransaction,
+                        // approvalSignatures: response.body.signatures,
                         approvalExpirationTimeSeconds: response.body.expirationTimeSeconds,
                     },
                 };
-                this._broadcastCallback(fillRequestAcceptedEvent, chainId);
+                this._broadcastCallback(fillRequestAcceptedEvent as any, chainId);
                 return;
             }
 
@@ -640,8 +652,8 @@ export class Handlers {
 
         return {
             status: HttpStatus.OK,
-            // body: response,
             body: {
+                approvalHash: response.approvalHash,
                 approvedOrderHashes: response.zeroxOrderHashes,
                 ordersRefusedApproval,
                 signatures: response.signatures,
@@ -658,6 +670,7 @@ export class Handlers {
     ): Promise<RequestTransactionResponse> {
 
         const verifyingContractAddress = this._cordinatorAddress;
+        console.log('this._cordinatorAddress ', this._cordinatorAddress);
 
 
         const zeroxOrderHashes: string[] = coordinatorOrders.map(order => {
@@ -666,7 +679,7 @@ export class Handlers {
 
         const constants = {
             COORDINATOR_DOMAIN_NAME: '0x Protocol Coordinator',
-            COORDINATOR_DOMAIN_VERSION: '1.0.0',
+            COORDINATOR_DOMAIN_VERSION: '3.0.0',
             COORDINATOR_APPROVAL_SCHEMA: {
                 name: 'CoordinatorApproval',
                 parameters: [
@@ -682,6 +695,7 @@ export class Handlers {
                 parameters: [
                     { name: 'name', type: 'string' },
                     { name: 'version', type: 'string' },
+                    { name: 'chainId', type: 'uint256' },
                     { name: 'verifyingContract', type: 'address' },
                 ],
             },
@@ -691,6 +705,7 @@ export class Handlers {
             name: constants.COORDINATOR_DOMAIN_NAME,
             version: constants.COORDINATOR_DOMAIN_VERSION,
             verifyingContract: verifyingContractAddress,
+            chainId,
         };
         const approval = {
             zeroxOrderHashes,
@@ -710,13 +725,27 @@ export class Handlers {
             message: approval,
         };
 
+        // TODO: generate previous EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH
+        // const EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH_v1 = sigUtil.TypedDataUtils.hashType(constants_v1.COORDINATOR_APPROVAL_SCHEMA.name, { CoordinatorApproval: constants_v1.COORDINATOR_APPROVAL_SCHEMA.parameters }).toString('hex');
+        const EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH = sigUtil.TypedDataUtils.hashType(constants.COORDINATOR_APPROVAL_SCHEMA.name, { CoordinatorApproval: constants.COORDINATOR_APPROVAL_SCHEMA.parameters }).toString('hex');
+        // const encodedApproval = sigUtil.TypedDataUtils.encodeData(constants.COORDINATOR_APPROVAL_SCHEMA.name, approval, { CoordinatorApproval: constants.COORDINATOR_APPROVAL_SCHEMA.parameters }).toString('hex');
+
+
+        // console.log('EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH, EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH_v1', [EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH, EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH_v1]);
+        console.log('EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH, EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH_v1', [EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH]);
+        // console.log('encodedApproval ', encodedApproval);
+
+
+        // const typedData = sigUtil.TypedDataUtils.encodeData(constants.COORDINATOR_APPROVAL_SCHEMA.name, approval, constants.COORDINATOR_APPROVAL_SCHEMA.parameters);	        // const typedData = sigUtil.TypedDataUtils.encodeData(constants.COORDINATOR_APPROVAL_SCHEMA.name, approval, constants.COORDINATOR_APPROVAL_SCHEMA.parameters);
+        // const approvalHashBuff = sigUtil.TypedDataUtils.hashStruct(constants.COORDINATOR_APPROVAL_SCHEMA.name, approval, { CoordinatorApproval: constants.COORDINATOR_APPROVAL_SCHEMA.parameters });
+
         // TODO: drop the any
-        const hashBuff = sigUtil.TypedDataUtils.sign(typedData as any);
+        const approvalHashBuff = sigUtil.TypedDataUtils.sign(typedData as any);
 
 
         // Since a coordinator can have multiple feeRecipientAddresses,
         // we need to make sure we issue a signature for each feeRecipientAddress
-        // found in the orders submitted (i.e., someone can batch fill two coordinator
+        // found in the orders submitted (i.e. someone can batch fill two coordinator
         // orders, each with a different feeRecipientAddress). In that case, we issue a
         // signature/expiration for each feeRecipientAddress
         const feeRecipientAddressSet = new Set<string>();
@@ -737,7 +766,7 @@ export class Handlers {
                     `Unexpected error: Found feeRecipientAddress ${feeRecipientAddress} that wasn't specified in config.`,
                 );
             }
-            const signature = ethUtil.ecsign(hashBuff, Buffer.from(feeRecipientIfExists.PRIVATE_KEY, 'hex'));
+            const signature = ethUtil.ecsign(approvalHashBuff, Buffer.from(feeRecipientIfExists.PRIVATE_KEY, 'hex'));
             const signatureBuffer = Buffer.concat([
                 ethUtil.toBuffer(signature.v),
                 signature.r,
@@ -749,6 +778,7 @@ export class Handlers {
         }
 
         return {
+            approvalHash: approvalHashBuff.toString('hex'),
             signatures,
             expirationTimeSeconds: approvalExpirationTimeSeconds,
             zeroxOrderHashes,
