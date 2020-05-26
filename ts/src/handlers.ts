@@ -48,7 +48,6 @@ export class Handlers {
             const contractAddresses = configs.CHAIN_ID_TO_CONTRACT_ADDRESSES
                 ? configs.CHAIN_ID_TO_CONTRACT_ADDRESSES[chainId]
                 : undefined;
-            console.log('chainId ', chainId);
             this._cordinatorAddress = configs.CHAIN_ID_TO_SETTINGS[chainId].COORDINATOR_CONTRACT_ADDRESS;
             const contractWrappers = new ContractWrappers(provider, {
                 chainId,
@@ -341,7 +340,7 @@ export class Handlers {
                     coordinatorOrders,
                     signedTransaction,
                     chainId,
-                    txOrigin,
+                    // txOrigin,
                 );
                 res.status(response.status).send(response.body);
                 return;
@@ -539,7 +538,7 @@ export class Handlers {
         coordinatorOrders: Order[],
         zeroExTransaction: ZeroExTransaction,
         chainId: number,
-        txOrigin: string,
+        // txOrigin: string,
     ): Promise<Response> {
         for (const order of coordinatorOrders) {
             if (zeroExTransaction.signerAddress !== order.makerAddress) {
@@ -552,16 +551,21 @@ export class Handlers {
                 ]);
             }
         }
+
+        const zeroxOrderHashes: string[] = [];
         // Once we are sure all orders can be cancelled, we cancel them all at once
         for (const order of coordinatorOrders) {
+            const orderHash = orderHashUtils.getOrderHashHex(order);
+            zeroxOrderHashes.push(orderHash);
+            // TODO: call relayer api to cancel orders
+            // relayerApi.cancelOrder(orderHash);
             await orderModel.cancelAsync(order);
         }
 
         const cancelRequestAccepted = {
             type: EventTypes.CancelRequestAccepted,
             data: {
-                orders: coordinatorOrders,
-                transaction: zeroExTransaction,
+                zeroxOrderHashes
             },
         };
         this._broadcastCallback(cancelRequestAccepted, chainId);
@@ -569,21 +573,22 @@ export class Handlers {
             coordinatorOrders,
         );
 
+
         // HACK(fabio): We want to re-use approvalSignatures for cancellation requests
         // but they don't expire. So we hard-code `0` as the expiration
-        const ZERO = 0;
-        const response = await this._generateApprovalSignatureAsync(
-            txOrigin,
-            coordinatorOrders,
-            chainId,
-            ZERO,
-        );
+        // const ZERO = 0;
+        // const response = await this._generateApprovalSignatureAsync(
+        //     txOrigin,
+        //     coordinatorOrders,
+        //     chainId,
+        //     ZERO,
+        // );
 
         return {
             status: HttpStatus.OK,
             body: {
                 outstandingFillSignatures,
-                cancellationSignatures: response.signatures,
+                zeroxOrderHashes,
             },
         };
     }
@@ -715,7 +720,6 @@ export class Handlers {
 
 
         const typedData = {
-
             primaryType: constants.COORDINATOR_APPROVAL_SCHEMA.name,
             types: {
                 EIP712Domain: constants.DEFAULT_DOMAIN_SCHEMA.parameters,

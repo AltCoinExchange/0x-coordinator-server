@@ -1,3 +1,15 @@
+## BFX fork changes
+
+TEC
+- change the approval format in the TEC
+    - change the EIP712_COORDINATOR_APPROVAL_SCHEMA_HASH in the TEC
+    - use sig util to allow for EIP 712 encoding of array values
+- allow for use of custom coordinator contract
+- define/change the approval return value
+- allow for orders that have already been approved to be re submitted to the TEC without failing hard/treating it as an error but not re-approving them
+- drop the signature requirement on the signed zerox transaction
+
+
 ## Table of contents
 
 -   [Introduction](#introduction)
